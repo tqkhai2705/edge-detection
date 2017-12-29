@@ -2,18 +2,19 @@
 #	--> Reference: https://en.wikipedia.org/wiki/Canny_edge_detector
 import tensorflow as tf
 import numpy as np
-from matplotlib import pyplot as plt
 
+MAX = 1	#Max value of a pixel
 GAUS_KERNEL = 3
-GAUS_SIGMA  = 1.0
+GAUS_SIGMA  = 1.2
 def Gaussian_Filter(kernel_size=GAUS_KERNEL, sigma=GAUS_SIGMA): #Default: Filter_shape = [5,5]
 # 	--> Reference: https://en.wikipedia.org/wiki/Canny_edge_detector#Gaussian_filter
-	k = (kernel_size-1)/2 
+	k = (kernel_size-1)//2 
 	filter = []
+	sigma_2 = sigma**2
 	for i in range(kernel_size):
 		filter_row = []
 		for j in range(kernel_size):
-			Hij = np.exp(-((i+1-(k+1))**2 + (j+1-(k+1))**2)/(2*sigma**2))/(2*np.pi*sigma**2)
+			Hij = np.exp(-((i+1-(k+1))**2 + (j+1-(k+1))**2)/(2*sigma_2))/(2*np.pi*sigma_2)
 			filter_row.append(Hij)
 		filter.append(filter_row)
 	
@@ -23,115 +24,137 @@ def Gaussian_Filter(kernel_size=GAUS_KERNEL, sigma=GAUS_SIGMA): #Default: Filter
  NOTE: 	All variables are initialized first for reducing proccessing time.
 		(If needed) Please remove them and uncomment the corresponding lines in TF_Canny function.
 """
-gaussian_filter = tf.constant(Gaussian_Filter(), tf.float32) 						#STEP-1
-h_filter = tf.reshape(tf.constant([[1,0,-1],[2,0,-2],[1,0,-1]], tf.float32), [3,3,1,1])	#STEP-2
+gaussian_filter = tf.constant(Gaussian_Filter(), tf.float32) 							#STEP-1
+h_filter = tf.reshape(tf.constant([[-1,0,1],[-2,0,2],[-1,0,1]], tf.float32), [3,3,1,1])	#STEP-2
 v_filter = tf.reshape(tf.constant([[1,2,1],[0,0,0],[-1,-2,-1]], tf.float32), [3,3,1,1])	#STEP-2
 
-np_filter_PHI = np.zeros((3,3,1,4))
-np_filter_PHI[0,0,0,0] = 1 #first pixel is top/left, passed to the first channel
-np_filter_PHI[2,2,0,1] = 1 #second pixel is bottom/right, passed to the second channel
-np_filter_PHI[0,2,0,2] = 1 #third pixel is top/right, passed to the third channel
-np_filter_PHI[2,0,0,3] = 1 #fourth pixel is bottom/left, passed to the fourth channel
-filter_PHI = tf.constant(np_filter_PHI, tf.float32)										#STEP-3
-np_filter_G = np.zeros((3,3,1,4))
-np_filter_G[0,1,0,0], np_filter_G[2,1,0,1], np_filter_G[1,0,0,2], np_filter_G[1,2,0,3] = 1,1,1,1 # Top-Bottom-Left-Right
-filter_G = tf.constant(np_filter_G, tf.float32)											#STEP-3
+np_filter_0 = np.zeros((3,3,1,2))
+np_filter_0[1,0,0,0], np_filter_0[1,2,0,1] = 1,1 ### Left & Right
+# print(np_filter_0)
+filter_0 = tf.constant(np_filter_0, tf.float32)
+np_filter_90 = np.zeros((3,3,1,2))
+np_filter_90[0,1,0,0], np_filter_90[2,1,0,1] = 1,1 ### Top & Bottom
+filter_90 = tf.constant(np_filter_90, tf.float32)
+np_filter_45 = np.zeros((3,3,1,2))
+np_filter_45[0,2,0,0], np_filter_45[2,0,0,1] = 1,1 ### Top-Right & Bottom-Left
+filter_45 = tf.constant(np_filter_45, tf.float32)
+np_filter_135 = np.zeros((3,3,1,2))
+np_filter_135[0,0,0,0], np_filter_135[2,2,0,1] = 1,1 ### Top-Left & Bottom-Right
+filter_135 = tf.constant(np_filter_135, tf.float32)
+	
+np_filter_sure = np.ones([3,3,1,1]); np_filter_sure[1,1,0,0] = 0
+filter_sure = tf.constant(np_filter_sure, tf.float32)
+border_paddings = tf.constant([[0,0],[1,1],[1,1],[0,0]])
 
-def TF_Clip(x, min, max): return tf.clip_by_value(x, min, max)
+def Border_Padding(x, pad_width):
+	for _ in range(pad_width): x = tf.pad(x, border_paddings, 'SYMMETRIC')
+	return x
+def FourAngles(d):
+	d0   = tf.to_float(tf.greater_equal(d,157.5))+tf.to_float(tf.less(d,22.5))
+	d45  = tf.to_float(tf.greater_equal(d,22.5))*tf.to_float(tf.less(d,67.5))
+	d90  = tf.to_float(tf.greater_equal(d,67.5))*tf.to_float(tf.less(d,112.5))
+	d135 = tf.to_float(tf.greater_equal(d,112.5))*tf.to_float(tf.less(d,157.5))
+	# return {'d0':d0, 'd45':d45, 'd90':d90, 'd135':d135}
+	return (d0,d45,d90,d135)
 
-""" The Input must have the shape [1, width, height, 1] """
-def TF_Canny(img_tensor, minRate=0.05, maxRate=0.2, remove_high_val=False):
-	MAX = tf.reduce_max(img_tensor)
+"""
+	NOTES: 
+	- Input ('img_tensor'): shape = [batch_size, width, height, 1]
+	- Output: a batch of images with pixels are either 1 (edge) or 0 (non-edge)
+"""
+def TF_Canny(img_tensor, minRate=0.10, maxRate=0.40, 
+			 preserve_size=True, remove_high_val=False, return_raw_edges=False):
+	""" STEP-0 (Preprocessing): 
+		1. Scale the tensor values to the expected range ([0,1]) 
+		2. If 'preserve_size': As TensorFlow will pad by 0s for padding='SAME',
+							   it is better to pad by the same values of the borders.
+							   (This is to avoid considering the borders as edges)
+	"""
+	img_tensor = (img_tensor/tf.reduce_max(img_tensor))*MAX
+	if preserve_size: img_tensor = Border_Padding(img_tensor, (GAUS_KERNEL-1)//2)
+
 	""" STEP-1: Noise reduction with Gaussian filter """
-	# gaussian_filter = tf.constant(Gaussian_Filter(kernel_size=3, sigma=0.5), dtype=tf.float32)
-	# img_tensor /= 255; img_tensor = tf.clip_by_value(img_tensor, 0, 0.1)
-	x_gaussian = TF_Clip(tf.nn.convolution(img_tensor, gaussian_filter, padding='SAME'), 0, MAX)
-	# Below is a heuristic to remove the intensity gradient inside a cloud
-	if remove_high_val: x_gaussian = TF_Clip(x_gaussian, 0, MAX/5)# tf.reduce_mean(x_gaussian))	
+	x_gaussian = tf.nn.convolution(img_tensor, gaussian_filter, padding='VALID')
+	### Below is a heuristic to remove the intensity gradient inside a cloud ###
+	if remove_high_val: x_gaussian = tf.clip_by_value(x_gaussian, 0, MAX/2)
 	
 	
 	""" STEP-2: Calculation of Horizontal and Vertical derivatives  with Sobel operator 
 		--> Reference: https://en.wikipedia.org/wiki/Sobel_operator	
 	"""
-	# h_filter = tf.reshape(tf.constant([[1,0,-1],[2,0,-2],[1,0,-1]], tf.float32), [3,3,1,1])
-	# v_filter = tf.reshape(tf.constant([[1,2,1],[0,0,0],[-1,-2,-1]], tf.float32), [3,3,1,1])
-	Gx = tf.nn.convolution(x_gaussian, h_filter, padding='SAME')
-	Gy = tf.nn.convolution(x_gaussian, v_filter, padding='SAME')
+	if preserve_size: x_gaussian = Border_Padding(x_gaussian, 1)
+	Gx = tf.nn.convolution(x_gaussian, h_filter, padding='VALID')
+	Gy = tf.nn.convolution(x_gaussian, v_filter, padding='VALID')
 	G 		= tf.sqrt(tf.square(Gx) + tf.square(Gy))
-	BIG_PHI	= tf.atan2(Gy,Gx)
+	BIG_PHI = tf.atan2(Gy,Gx)
+	BIG_PHI	= (BIG_PHI*180/np.pi)%180 			### Convert from Radian to Degree
+	D_0,D_45,D_90,D_135 = FourAngles(BIG_PHI)	### Round to 0, 45, 90, 135 (only take the masks)
+	
 	
 	""" STEP-3: NON-Maximum Suppression
 		--> Reference: https://stackoverflow.com/questions/46553662/conditional-value-on-tensor-relative-to-element-neighbors
 	"""
-	""" 3.1-Selecting Edge-Pixels on diagonal directions """
-	# np_filter_PHI = np.zeros((3,3,1,4))
-	# np_filter_PHI[0,0,0,0] = 1 #first pixel is top/left, passed to the first channel
-	# np_filter_PHI[2,2,0,1] = 1 #second pixel is bottom/right, passed to the second channel
-	# np_filter_PHI[0,2,0,2] = 1 #third pixel is top/right, passed to the third channel
-	# np_filter_PHI[2,0,0,3] = 1 #fourth pixel is bottom/left, passed to the fourth channel
-	# filter_PHI = tf.constant(np_filter_PHI, tf.float32)	
-	targetPixels_PHI = tf.nn.convolution(BIG_PHI, filter_PHI, padding='SAME')
-	isGreater_PHI = tf.cast(tf.greater(BIG_PHI, targetPixels_PHI), tf.float32)
 	
-	# Merging the 4 channels, considering they're 0 for false and 1 for true
-	# Note: Indices [:,:,:,0:1] is for keeping 4 dimensions (Indices [:,:,:,0] will return only 3 dimensions)
-	isMax_PHI1 = isGreater_PHI[:,:,:,0:1]*isGreater_PHI[:,:,:,1:2] #Diagonal direction (north-west to south-east)
-	isMax_PHI2 = isGreater_PHI[:,:,:,2:3]*isGreater_PHI[:,:,:,3:4] #Diagonal direction (north-east to south-west)
-	# Now, the center pixel will remain if isGreater = 1 at that position:
-	edges_PHI = TF_Clip(BIG_PHI*isMax_PHI1 + BIG_PHI*isMax_PHI2, 0, MAX)
+	""" 3.1-Selecting Edge-Pixels on the Horizontal direction """	
+	targetPixels_0 = tf.nn.convolution(G, filter_0, padding='SAME')
+	isGreater_0 = tf.to_float(tf.greater(G*D_0, targetPixels_0))
+	isMax_0 = isGreater_0[:,:,:,0:1]*isGreater_0[:,:,:,1:2]
+	### Note: Need to keep 4 dimensions (index [:,:,:,0] is 3 dimensions) ###
 	
-	""" 3.2-Selecting Edge-Pixels on Horizontal and Vertical directions """
-	# np_filter_G = np.zeros((3,3,1,4))
-	# np_filter_G[0,1,0,0], np_filter_G[2,1,0,1], np_filter_G[1,0,0,2], np_filter_G[1,2,0,3] = 1,1,1,1 # Top-Bottom-Left-Right
-	# filter_G = tf.constant(np_filter_G, tf.float32)
-	targetPixels_G = tf.nn.convolution(G, filter_G, padding='SAME')
-	isGreater_G = tf.cast(tf.greater(G, targetPixels_G), tf.float32)
-	isMax_G1 = isGreater_G[:,:,:,0:1]*isGreater_G[:,:,:,1:2] #Vertical direction (top to bottom)
-	isMax_G2 = isGreater_G[:,:,:,2:3]*isGreater_G[:,:,:,3:4] #Horizontal direction (left to right)
-	edges_G = TF_Clip(G*isMax_G1 + G*isMax_G2, 0, MAX)
+	""" 3.2-Selecting Edge-Pixels on the Vertical direction """
+	targetPixels_90 = tf.nn.convolution(G, filter_90, padding='SAME')
+	isGreater_90 = tf.to_float(tf.greater(G*D_90, targetPixels_90))
+	isMax_90 = isGreater_90[:,:,:,0:1]*isGreater_90[:,:,:,1:2]
 	
-	""" 3.3-Merging Edges on Horizontal-Vertical and Diagonal directions """
-	edges_merged = TF_Clip(edges_G + edges_PHI, 0, MAX)
+	""" 3.3-Selecting Edge-Pixels on the Diag-45 direction """
+	targetPixels_45 = tf.nn.convolution(G, filter_45, padding='SAME')
+	isGreater_45 = tf.to_float(tf.greater(G*D_45, targetPixels_45))
+	isMax_45 = isGreater_45[:,:,:,0:1]*isGreater_45[:,:,:,1:2]
 	
-	"""STEP-4: Hysteresis Thresholding
-		(I remove values smaller than the average. You may change this threshold.)
-		--> The result is a matrix with TRUE (edge pixel) and FALSE (non-edge pixel)
-	"""
-	# edges_merged /= tf.reduce_max(edges_merged)
-	edges_sure = tf.cast(tf.greater(edges_merged, maxRate*MAX), tf.float32)
-	edges_weak_and_sure = tf.cast(tf.greater(edges_merged, minRate*MAX), tf.float32)
+	""" 3.4-Selecting Edge-Pixels on the Diag-135 direction """
+	targetPixels_135 = tf.nn.convolution(G, filter_135, padding='SAME')
+	isGreater_135 = tf.to_float(tf.greater(G*D_135, targetPixels_135))
+	isMax_135 = isGreater_135[:,:,:,0:1]*isGreater_135[:,:,:,1:2]
 	
-	np_filter_sure = np.ones([3,3,1,1]); np_filter_sure[1,1,0,0] = 0
-	filter_sure = tf.constant(np_filter_sure, tf.float32)
-	edges_connected_to_sure = tf.nn.convolution(edges_sure, filter_sure, padding='SAME')
-	# edges_final = tf.greater(edges_sure + edges_connected_to_sure*edges_weak_and_sure, 0)
-	edges_final = edges_sure
-	return tf.cast(tf.squeeze(edges_final), tf.float32)
+	""" 3.5-Merging Edges on Horizontal-Vertical and Diagonal directions """
+	edges_raw = G*(isMax_0 + isMax_90 + isMax_45 + isMax_135)
+	edges_raw = tf.clip_by_value(edges_raw, 0, MAX)
+	
+	### If only the raw edges are needed ###
+	if return_raw_edges: return tf.squeeze(edges_raw)
+	
+	
+	""" STEP-4: Hysteresis Thresholding """
+	edges_sure = tf.to_float(tf.greater_equal(edges_raw, maxRate))
+	edges_weak = tf.to_float(tf.less(edges_raw, maxRate))*tf.to_float(tf.greater_equal(edges_raw, minRate))
+	
+	edges_connected = tf.nn.convolution(edges_sure, filter_sure, padding='SAME')*edges_weak
+	for _ in range(10): edges_connected = tf.nn.convolution(edges_connected, filter_sure, padding='SAME')*edges_weak
+	
+	edges_final = edges_sure + tf.clip_by_value(edges_connected,0,MAX)
+	return tf.squeeze(edges_final)
 
-def Edges_Plot(img, edges):
-		plt.subplot(121), plt.imshow(img, cmap='nipy_spectral')
-		plt.title('Original Image'), plt.xticks([]), plt.yticks([])
-		plt.subplot(122), plt.imshow(edges, cmap='gray')
-		plt.title('Edges'), plt.xticks([]), plt.yticks([])
-		plt.tight_layout()
-		plt.show()
-		plt.close('all')
-	
+
 if __name__ == '__main__': # Test the above code
-	import cv2		# OpenCV is used for comparing final result
-	from matplotlib import pyplot as plt
+	import cv2
+	import matplotlib.pyplot as plt		
+		
+	img = np.zeros((50,50)) #You need to load an IMG here
+	img[0,0:10] = 255; img[1,0:8] = 255; img[2,0:6]=100; img[3,0:5]=100
+	edges_opencv = cv2.Canny(np.uint8(img), 50, 100)
 	
-	input_img = tf.placeholder(tf.float32, [101,101])
+	""" Test with Canny Edge Detection """
+	input_img = tf.placeholder(tf.float32, [50,50])
 	x_tensor = tf.expand_dims(tf.expand_dims(input_img, axis=0),-1)
-	final_output = TF_Canny(x_tensor, remove_high_val=True)
+	edges_tensor = TF_Canny(x_tensor, return_raw_edges=True)
 	
-	init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
-	with tf.Session() as sess:
-		sess.run(init_op)		
-		img = cv2.imread('examples/example-3.png')[:,:,0]
-		edges = cv2.Canny(img, 101, 101)		
-		f_img = sess.run(final_output, feed_dict={input_img:img})
-		print(f_img.shape)
-		print(np.max(f_img))
-		print(np.min(f_img))
-		Edges_Plot(img, f_img)
+	with tf.Session() as sess: edges_tf = sess.run(edges_tensor, feed_dict={input_img:img})
+	
+	plt.subplot(131), plt.imshow(img, cmap='gray')
+	plt.title('Original Image'), plt.xticks([]), plt.yticks([])
+	plt.subplot(132), plt.imshow(edges_opencv, cmap='gray')
+	plt.title('Edges-OpenCV.Canny'), plt.xticks([]), plt.yticks([])
+	plt.subplot(133), plt.imshow(edges_tf, cmap='gray')
+	plt.title('Edges-TF_Canny'), plt.xticks([]), plt.yticks([])
+	plt.tight_layout()
+	plt.show()
