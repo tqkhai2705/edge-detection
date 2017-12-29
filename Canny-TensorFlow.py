@@ -22,9 +22,8 @@ def Gaussian_Filter(kernel_size=GAUS_KERNEL, sigma=GAUS_SIGMA): #Default: Filter
 
 """
  NOTE: 	All variables are initialized first for reducing proccessing time.
-		(If needed) Please remove them and uncomment the corresponding lines in TF_Canny function.
 """
-gaussian_filter = tf.constant(Gaussian_Filter(), tf.float32) 							#STEP-1
+gaussian_filter = tf.constant(Gaussian_Filter(), tf.float32) 				#STEP-1
 h_filter = tf.reshape(tf.constant([[-1,0,1],[-2,0,2],[-1,0,1]], tf.float32), [3,3,1,1])	#STEP-2
 v_filter = tf.reshape(tf.constant([[1,2,1],[0,0,0],[-1,-2,-1]], tf.float32), [3,3,1,1])	#STEP-2
 
@@ -59,7 +58,7 @@ def FourAngles(d):
 
 """
 	NOTES: 
-	- Input ('img_tensor'): shape = [batch_size, width, height, 1]
+	- Input ('img_tensor'): shape = [batch_size, height, width, 1] (This version supports only 1 channel)
 	- Output: a batch of images with pixels are either 1 (edge) or 0 (non-edge)
 """
 def TF_Canny(img_tensor, minRate=0.10, maxRate=0.40, 
@@ -87,8 +86,8 @@ def TF_Canny(img_tensor, minRate=0.10, maxRate=0.40,
 	Gy = tf.nn.convolution(x_gaussian, v_filter, padding='VALID')
 	G 		= tf.sqrt(tf.square(Gx) + tf.square(Gy))
 	BIG_PHI = tf.atan2(Gy,Gx)
-	BIG_PHI	= (BIG_PHI*180/np.pi)%180 			### Convert from Radian to Degree
-	D_0,D_45,D_90,D_135 = FourAngles(BIG_PHI)	### Round to 0, 45, 90, 135 (only take the masks)
+	BIG_PHI	= (BIG_PHI*180/np.pi)%180 		### Convert from Radian to Degree
+	D_0,D_45,D_90,D_135 = FourAngles(BIG_PHI)	### Round the directions to 0, 45, 90, 135 (only take the masks)
 	
 	
 	""" STEP-3: NON-Maximum Suppression
@@ -140,7 +139,7 @@ if __name__ == '__main__': # Test the above code
 	import matplotlib.pyplot as plt		
 		
 	img = np.zeros((50,50)) #You need to load an IMG here
-	img[0,0:10] = 255; img[1,0:8] = 255; img[2,0:6]=100; img[3,0:5]=100
+	img[0,0:10] = 255; img[1,0:8] = 255; img[2,0:6]=100; img[3,0:5]=100; img[4,0:4] = 100
 	edges_opencv = cv2.Canny(np.uint8(img), 50, 100)
 	
 	""" Test with Canny Edge Detection """
