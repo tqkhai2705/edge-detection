@@ -1,3 +1,2 @@
-# edge-detection
-To run: python Canny-TensorFlow.py
-To change the test-image: change the example name in 'img = cv2.imread()'
+# Canny edge-detection in TensorFlow (tested with TensorFlow 1.4)
+To run a quick test: python -B Canny-TensorFlow.py
